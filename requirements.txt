@@ -1,0 +1,2 @@
+httpx>=0.25
+openpyxl>=3.1

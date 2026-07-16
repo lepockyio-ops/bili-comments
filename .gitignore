@@ -1,0 +1,25 @@
+# 秘密（登录 cookie）— 绝对不能进仓库
+.env
+.env.*
+!.env.example
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+env/
+*.egg-info/
+
+# 运行时产出（用户本地数据，不进仓库）
+data/*.xlsx
+data/*.csv
+data/*.log
+data/*.json
+
+# IDE
+.vscode/
+.idea/
+*.swp
+.DS_Store
+Thumbs.db
