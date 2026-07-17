@@ -504,13 +504,13 @@ def export_xlsx(meta: dict, comments: list[dict], out_path: Path, target_lang: s
         for cell in row:
             cell.font = Font(bold=True)
 
-    # ---------- Sheet 3: Top 20 高赞（含回复推荐） ----------
+    # ---------- Sheet 3: Top 20 高赞（v2.1 精简版）----------
     ws3 = wb.create_sheet("Top 20 高赞")
-    ws3.append(["排名", "用户名", "等级", "点赞", "评论中文", "AI日语翻译", "意图", "推荐回复 1", "链接"])
-    for col_idx in range(1, 10):
+    ws3.append(["排名", "用户名", "点赞", "评论中文", "AI日语翻译", "链接"])
+    for col_idx in range(1, 7):
         cell = ws3.cell(row=1, column=col_idx)
-        cell.fill = v2_fill if col_idx in (6, 7, 8) else header_fill
-        cell.font = v2_font if col_idx in (6, 7, 8) else header_font
+        cell.fill = v2_fill if col_idx == 5 else header_fill
+        cell.font = header_font
         cell.alignment = Alignment(horizontal="center")
 
     top20 = sorted(
@@ -520,32 +520,31 @@ def export_xlsx(meta: dict, comments: list[dict], out_path: Path, target_lang: s
     for i, c in enumerate(top20, start=2):
         ws3.cell(row=i, column=1, value=i - 1)
         ws3.cell(row=i, column=2, value=c["uname"])
-        ws3.cell(row=i, column=3, value=c["level"])
-        ws3.cell(row=i, column=4, value=c["like"])
-        ws3.cell(row=i, column=5, value=c["message"])
-        ws3.cell(row=i, column=6, value=c.get("ai_translation", ""))
-        ws3.cell(row=i, column=7, value=c.get("intent", ""))
-        ws3.cell(row=i, column=8, value=c.get("reply_1", ""))
-        ws3.cell(row=i, column=9,
-                 value=f"https://www.bilibili.com/video/{meta['bvid']}#reply{c['rpid']}")
-        intent = c.get("intent", "")
-        fill = intent_fills.get(intent)
-        if fill:
-            ws3.cell(row=i, column=7).fill = fill
+        ws3.cell(row=i, column=3, value=c["like"])
+        ws3.cell(row=i, column=4, value=c["message"])
+        ws3.cell(row=i, column=5, value=c.get("ai_translation", ""))
+        ws3.cell(row=i, column=6, value=f"https://www.bilibili.com/video/{meta['bvid']}#reply{c['rpid']}")
 
-    widths3 = [6, 20, 5, 7, 55, 55, 10, 45, 45]
+    widths3 = [6, 22, 8, 60, 60, 40]
     for i, w in enumerate(widths3, 1):
         ws3.column_dimensions[get_column_letter(i)].width = w
     ws3.freeze_panes = "A2"
-    for row in ws3.iter_rows(min_row=2, min_col=5, max_col=8):
+
+    # Top 20 里的 UP 主评论也高亮
+    for i, c in enumerate(top20, start=2):
+        if c.get("is_up") == "是":
+            for col_idx in range(1, 7):
+                ws3.cell(row=i, column=col_idx).fill = up_fill
+    # 评论 + 翻译两列开启换行
+    for row in ws3.iter_rows(min_row=2, min_col=4, max_col=5):
         for cell in row:
             cell.alignment = Alignment(wrap_text=True, vertical="top")
 
     out_path.parent.mkdir(parents=True, exist_ok=True)
     wb.save(out_path)
     print(f"\n✓ XLSX 已保存：{out_path.resolve()}")
-    print(f"  → 绿色列（AI日语翻译 / 意图 / 推荐回复）在本地 Excel 里也可直接看")
-    print(f"  → 「备用公式翻译」列在 Google Sheets 里会自动执行 =GOOGLETRANSLATE")
+    print(f"  → 5 列精简版：用户名 / 评论中文 / AI日语翻译 / 点赞 / 发布时间")
+    print(f"  → UP 主评论行自动黄色高亮")
 
 
 # ============================================================================
