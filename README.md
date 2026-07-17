@@ -6,6 +6,8 @@
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 [![Claude Skill](https://img.shields.io/badge/Claude-Skill-orange.svg)]()
 
+> 📖 **完整使用手册请看 [USAGE.md](USAGE.md)** — 包含 4 大场景化工作流（给日方发反馈报告 / 捕捉商业机会 / 短视频切片辅助 / 情感评估）、SESSDATA 详细配置、Google Sheets 完整教程、字段说明、翻译质量优化、Vocaloid 运营实战建议、FAQ、故障排查。
+
 ## 使用场景
 
 - **日本曲师/绘师不懂中文** — 你把中文评论翻成日语给他们看，让他们知道中国粉丝在说什么
