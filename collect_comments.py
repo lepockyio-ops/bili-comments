@@ -407,98 +407,52 @@ def export_xlsx(meta: dict, comments: list[dict], out_path: Path, target_lang: s
     ws = wb.active
     ws.title = "评论"
 
+    # v2.1 精简版：只保留 5 个核心列
     headers = [
-        "楼层", "类型", "用户名", "等级", "大会员", "是否UP", "勋章",
+        "用户名",
         "评论中文（原文）",
-        "AI日语翻译",            # v2 新
-        "意图",                   # v2 新
-        "推荐回复 1",             # v2 新
-        "推荐回复 2",             # v2 新
-        "推荐回复 3",             # v2 新
-        f"备用公式翻译（{target_lang}）",
-        "点赞", "回复数", "发布时间", "用户签名", "rpid", "父评论rpid",
+        "AI日语翻译",
+        "点赞",
+        "发布时间",
     ]
     ws.append(headers)
 
     header_fill = PatternFill("solid", fgColor="1F4E78")
     header_font = Font(bold=True, color="FFFFFF", size=11)
-    v2_fill = PatternFill("solid", fgColor="2E7D32")  # v2 列绿色区分
-    v2_font = Font(bold=True, color="FFFFFF", size=11)
+    v2_fill = PatternFill("solid", fgColor="2E7D32")
 
-    v2_cols = {9, 10, 11, 12, 13}  # 1-indexed
+    # 只有 "AI日语翻译" 列用绿色区分
+    v2_cols = {3}
     for col_idx, _ in enumerate(headers, 1):
         cell = ws.cell(row=1, column=col_idx)
-        if col_idx in v2_cols:
-            cell.fill = v2_fill
-            cell.font = v2_font
-        else:
-            cell.fill = header_fill
-            cell.font = header_font
+        cell.fill = v2_fill if col_idx in v2_cols else header_fill
+        cell.font = header_font
         cell.alignment = Alignment(horizontal="center", vertical="center")
 
-    intent_fills = {
-        "强烈好评": PatternFill("solid", fgColor="E8F5E9"),
-        "情感深度": PatternFill("solid", fgColor="E3F2FD"),
-        "求二创授权": PatternFill("solid", fgColor="FFF9C4"),
-        "求资源": PatternFill("solid", fgColor="FFF9C4"),
-        "求歌词": PatternFill("solid", fgColor="FFF9C4"),
-        "求周边": PatternFill("solid", fgColor="FFECB3"),
-        "求合作": PatternFill("solid", fgColor="FFECB3"),
-        "询问信息": PatternFill("solid", fgColor="F3E5F5"),
-        "负面质疑": PatternFill("solid", fgColor="FFCDD2"),
-        "一般点赞": PatternFill("solid", fgColor="FAFAFA"),
-        "其他": PatternFill("solid", fgColor="FAFAFA"),
-        "UP主本人": PatternFill("solid", fgColor="FFF3CD"),
-        "楼中楼跳过": PatternFill("solid", fgColor="F5F5F5"),
-    }
-
     for i, c in enumerate(comments, start=2):
-        typ = "楼中楼" if c["is_sub"] else "主评论"
-        floor = "" if c["is_sub"] else i - 1
+        ws.cell(row=i, column=1, value=c["uname"])
+        ws.cell(row=i, column=2, value=c["message"])
+        ws.cell(row=i, column=3, value=c.get("ai_translation", ""))
+        ws.cell(row=i, column=4, value=c["like"])
+        ws.cell(row=i, column=5, value=fmt_time(c["ctime"]))
 
-        ws.cell(row=i, column=1, value=floor)
-        ws.cell(row=i, column=2, value=typ)
-        ws.cell(row=i, column=3, value=c["uname"])
-        ws.cell(row=i, column=4, value=c["level"])
-        ws.cell(row=i, column=5, value=c["vip"])
-        ws.cell(row=i, column=6, value=c["is_up"])
-        ws.cell(row=i, column=7, value=c["nameplate"])
-        ws.cell(row=i, column=8, value=c["message"])
-        ws.cell(row=i, column=9, value=c.get("ai_translation", ""))
-        ws.cell(row=i, column=10, value=c.get("intent", ""))
-        ws.cell(row=i, column=11, value=c.get("reply_1", ""))
-        ws.cell(row=i, column=12, value=c.get("reply_2", ""))
-        ws.cell(row=i, column=13, value=c.get("reply_3", ""))
-        ws.cell(row=i, column=14,
-                value=f'=IF(H{i}="","",GOOGLETRANSLATE(H{i},"zh-CN","{target_lang}"))')
-        ws.cell(row=i, column=15, value=c["like"])
-        ws.cell(row=i, column=16, value=c["rcount"])
-        ws.cell(row=i, column=17, value=fmt_time(c["ctime"]))
-        ws.cell(row=i, column=18, value=c["sign"])
-        ws.cell(row=i, column=19, value=str(c["rpid"]))
-        ws.cell(row=i, column=20, value=str(c["parent_rpid"]) if c["parent_rpid"] else "")
-
-        # 意图颜色
-        intent = c.get("intent", "")
-        fill = intent_fills.get(intent)
-        if fill:
-            ws.cell(row=i, column=10).fill = fill
-
-    widths = [6, 8, 20, 5, 6, 6, 12, 50, 50, 10, 40, 40, 40, 40, 7, 7, 16, 25, 14, 14]
+    widths = [22, 60, 60, 8, 18]
     for i, w in enumerate(widths, 1):
         ws.column_dimensions[get_column_letter(i)].width = w
 
     ws.freeze_panes = "A2"
     ws.auto_filter.ref = ws.dimensions
-    for row in ws.iter_rows(min_row=2, min_col=8, max_col=14):
+    # 评论 + 翻译两列开启换行
+    for row in ws.iter_rows(min_row=2, min_col=2, max_col=3):
         for cell in row:
             cell.alignment = Alignment(wrap_text=True, vertical="top")
 
+    # UP 主评论自动高亮（用原始数据的 is_up 字段判断）
     up_fill = PatternFill("solid", fgColor="FFF3CD")
-    for row_idx in range(2, ws.max_row + 1):
-        if ws.cell(row=row_idx, column=6).value == "是":
-            for col_idx in [1, 2, 3, 4, 5, 6, 7, 8]:
-                ws.cell(row=row_idx, column=col_idx).fill = up_fill
+    for i, c in enumerate(comments, start=2):
+        if c.get("is_up") == "是":
+            for col_idx in range(1, len(headers) + 1):
+                ws.cell(row=i, column=col_idx).fill = up_fill
 
     # ---------- Sheet 2: 视频信息 ----------
     ws2 = wb.create_sheet("视频信息")
