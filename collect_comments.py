@@ -1,33 +1,26 @@
 #!/usr/bin/env python3
 """
-BiliComments — B 站视频评论收集器
-=================================
-输入 B 站视频链接或 bvid → 抓取评论 → 输出 Google Sheets 友好的 XLSX
-（含 =GOOGLETRANSLATE 公式，中→日自动翻译）
+BiliComments v2 — B 站视频评论收集器
+=====================================
+输入 B 站视频链接或 bvid → 抓取评论 → 输出增强的 XLSX
+包含：
+  * 原文评论
+  * AI 日语翻译（Google Translate + Vocaloid 术语表预处理）
+  * 意图自动分类（求授权/求歌词/情感深度/负面质疑等）
+  * 推荐日语回复（3 条模板供 UP 挑选）
+  * GOOGLETRANSLATE 公式列作为备用
 
 用法：
     python collect_comments.py BV1FDNJ6BE4j
-    python collect_comments.py https://www.bilibili.com/video/BV1FDNJ6BE4j --out my.xlsx
-    python collect_comments.py BV1FDNJ6BE4j --include-replies      # 含楼中楼
-    python collect_comments.py BV1FDNJ6BE4j --sort new             # 按时间排序（默认 hot）
-    python collect_comments.py BV1FDNJ6BE4j --max-pages 5          # 只抓前 5 页
-    python collect_comments.py BV1FDNJ6BE4j --target-lang ja       # 翻译目标语言
+    python collect_comments.py BVxxx --max-pages 1               # 只抓 top 20
+    python collect_comments.py BVxxx --include-replies           # 含楼中楼
+    python collect_comments.py BVxxx --no-translate --no-reply   # 关闭 v2 特性
 
-登录相关（可选，但强烈建议）：
-    B 站对未登录用户只返回 3 条热门评论（2025 后新反爬策略）。
-    要抓全量评论，需要提供 SESSDATA cookie：
+登录（可选，抓全量必须）：
+    在 .env 里设置 BILI_SESSDATA=你的cookie 值
+    或者环境变量 BILI_SESSDATA
 
-    Windows PowerShell:
-        $env:BILI_SESSDATA = "你的_SESSDATA_值"
-        python collect_comments.py BV1xxx
-
-    或写到本目录下的 .env 文件（推荐）：
-        BILI_SESSDATA=你的_SESSDATA_值
-
-    获取方式：登录 B 站 → F12 打开开发者工具 → Application → Cookies → 找 SESSDATA。
-    ⚠️ SESSDATA 相当于登录凭证，勿泄露、勿提交到 git（本项目 .gitignore 已排除 .env）
-
-依赖：httpx, openpyxl
+依赖：httpx, openpyxl, pyyaml, deep-translator
 """
 from __future__ import annotations
 
@@ -45,7 +38,7 @@ from pathlib import Path
 try:
     import httpx
 except ImportError:
-    print("缺少 httpx。pip install httpx openpyxl", file=sys.stderr)
+    print("缺少 httpx。pip install httpx openpyxl pyyaml deep-translator", file=sys.stderr)
     sys.exit(1)
 
 try:
@@ -53,7 +46,7 @@ try:
     from openpyxl.styles import Font, Alignment, PatternFill
     from openpyxl.utils import get_column_letter
 except ImportError:
-    print("缺少 openpyxl。pip install httpx openpyxl", file=sys.stderr)
+    print("缺少 openpyxl。pip install httpx openpyxl pyyaml deep-translator", file=sys.stderr)
     sys.exit(1)
 
 
@@ -63,7 +56,6 @@ SCRIPT_DIR = Path(__file__).parent.resolve()
 DEFAULT_OUT_DIR = SCRIPT_DIR / "data"
 ENV_FILE = SCRIPT_DIR / ".env"
 
-# wbi 签名用表
 MIXIN_KEY_ENC_TAB = [
     46, 47, 18, 2, 53, 8, 23, 32, 15, 50, 10, 31, 58, 3, 45, 35,
     27, 43, 5, 49, 33, 9, 42, 19, 29, 28, 14, 39, 12, 38, 41, 13,
@@ -96,7 +88,6 @@ def clean_msg(msg: str) -> str:
 
 
 def load_env_sessdata() -> str | None:
-    """从 .env 文件或环境变量读 SESSDATA。"""
     val = os.environ.get("BILI_SESSDATA", "").strip()
     if val:
         return val
@@ -172,19 +163,10 @@ class BiliClient:
         return r.json()
 
     def get_comments_page(self, oid: int, bvid: str, next_cursor: int = 0, mode: int = 3) -> dict:
-        """
-        用新接口 /x/v2/reply/wbi/main + wbi 签名 + cursor 分页。
-        mode: 3=按热度（默认）, 2=按时间, 1=只看楼主
-        """
         self._get_wbi_keys()
         params = {
-            "next": next_cursor,
-            "type": 1,
-            "oid": oid,
-            "mode": mode,
-            "plat": 1,
-            "web_location": 1315875,
-            "seek_rpid": "",
+            "next": next_cursor, "type": 1, "oid": oid, "mode": mode,
+            "plat": 1, "web_location": 1315875, "seek_rpid": "",
         }
         signed = wbi_sign(params, self._img_key, self._sub_key)
         for attempt in range(3):
@@ -264,8 +246,7 @@ def collect_all(
     if sessdata:
         print(f"→ 使用 SESSDATA 登录（可抓全量评论）")
     else:
-        print(f"⚠️  未提供 SESSDATA cookie — 只能拿到少数热门评论（B站反爬策略）")
-        print(f"   完整抓取请在 .env 里设置 BILI_SESSDATA=... 或环境变量 BILI_SESSDATA")
+        print(f"⚠️  未提供 SESSDATA cookie — 只能拿到少数热门评论")
 
     print(f"→ 查询视频信息 {bvid}")
     view = client.get_view(bvid)
@@ -274,24 +255,18 @@ def collect_all(
 
     v = view["data"]
     aid = v["aid"]
-    total_reply = v["stat"]["reply"]
     up_mid = int((v.get("owner") or {}).get("mid") or 0)
     meta = {
-        "bvid": bvid,
-        "aid": aid,
-        "title": v["title"],
+        "bvid": bvid, "aid": aid, "title": v["title"],
         "up_name": (v.get("owner") or {}).get("name", ""),
-        "up_mid": up_mid,
-        "pubdate": v.get("pubdate"),
-        "cover": v.get("pic", ""),
-        "duration": v.get("duration"),
-        "stat": v.get("stat", {}),
-        "collected_at": int(time.time()),
+        "up_mid": up_mid, "pubdate": v.get("pubdate"),
+        "cover": v.get("pic", ""), "duration": v.get("duration"),
+        "stat": v.get("stat", {}), "collected_at": int(time.time()),
         "logged_in": bool(sessdata),
     }
 
     print(f"→ 《{meta['title']}》 · UP {meta['up_name']}")
-    print(f"→ 评论总数 (声称): {total_reply}")
+    print(f"→ 评论总数 (声称): {v['stat']['reply']}")
     print(f"→ 开始拉取评论 (sort={sort}, mode={mode})")
 
     comments: list[dict] = []
@@ -304,17 +279,14 @@ def collect_all(
         if max_pages and page_idx >= max_pages:
             print(f"  · 达到 max-pages={max_pages}，停止")
             break
-
         resp = client.get_comments_page(aid, bvid, next_cursor=next_cursor, mode=mode)
         if resp.get("code") != 0:
             print(f"  ! cursor={next_cursor} 失败: {resp.get('message')}")
             break
-
         data = resp.get("data") or {}
         replies = data.get("replies") or []
         cursor = data.get("cursor") or {}
 
-        # 首页混入置顶
         if first_page:
             top_replies = data.get("top_replies") or []
             upper = (data.get("upper") or {}).get("top")
@@ -338,17 +310,13 @@ def collect_all(
         print(f"  · page {page_idx} (cursor={next_cursor}) +{new_count} (累计 {len(comments)})"
               f" · is_end={cursor.get('is_end')} · all_count={cursor.get('all_count')}")
 
-        if cursor.get("is_end"):
+        if cursor.get("is_end") or not replies:
             break
-        if not replies:
-            break
-
         next_cursor = cursor.get("next", 0)
         if not next_cursor:
             break
         time.sleep(random.uniform(1.5, 3.0))
 
-    # 楼中楼
     if include_replies:
         main_with_replies = [c for c in comments if c["rcount"] > 0 and not c["is_sub"]]
         print(f"\n→ 开始拉取楼中楼（{len(main_with_replies)} 条主评论有回复）")
@@ -374,45 +342,120 @@ def collect_all(
                 if sub_pages >= 10:
                     break
             if i % 5 == 0:
-                print(f"  · 子评论进度 {i}/{len(main_with_replies)}（累计 {len(comments)}）")
+                print(f"  · 子评论进度 {i}/{len(main_with_replies)}")
 
     client.close()
     main_count = sum(1 for c in comments if not c["is_sub"])
     sub_count = sum(1 for c in comments if c["is_sub"])
     print(f"\n✓ 采集完成：{len(comments)} 条评论（主 {main_count} + 楼中楼 {sub_count}）")
-    if not sessdata and main_count < 10 and total_reply > 20:
-        print(f"⚠️  官方声称有 {total_reply} 条评论，实际只拿到 {main_count} 条")
-        print(f"   这是 B 站对匿名用户的限制。要抓全量，请配置 SESSDATA cookie（见脚本头部注释）")
     return meta, comments
 
 
 # ============================================================================
-# XLSX 输出
+# v2 增强：翻译 + 回复推荐
+# ============================================================================
+def enrich_comments(
+    comments: list[dict],
+    do_translate: bool = True,
+    do_reply: bool = True,
+    target_lang: str = "ja",
+) -> None:
+    """给评论添加 ai_translation / intent / replies 三个字段（in-place）"""
+    if do_translate:
+        try:
+            from translator import translate_comments as _translate_batch
+            messages = [c["message"] for c in comments]
+            translations = _translate_batch(messages, target_lang=target_lang, verbose=True)
+            for c, t in zip(comments, translations):
+                c["ai_translation"] = t or ""
+        except Exception as e:
+            print(f"⚠️  翻译失败（将 fallback 到公式列）: {e}")
+            for c in comments:
+                c["ai_translation"] = ""
+    else:
+        for c in comments:
+            c["ai_translation"] = ""
+
+    if do_reply:
+        try:
+            from reply_gen import generate_replies_for_comments as _gen_replies
+            results = _gen_replies(comments, k=3)
+            for c, (intent, replies) in zip(comments, results):
+                c["intent"] = intent
+                c["reply_1"] = replies[0] if len(replies) > 0 else ""
+                c["reply_2"] = replies[1] if len(replies) > 1 else ""
+                c["reply_3"] = replies[2] if len(replies) > 2 else ""
+            print(f"✓ 已为 {len(comments)} 条评论生成意图标签与回复建议")
+        except Exception as e:
+            print(f"⚠️  回复生成失败: {e}")
+            for c in comments:
+                c["intent"] = ""
+                c["reply_1"] = c["reply_2"] = c["reply_3"] = ""
+    else:
+        for c in comments:
+            c["intent"] = ""
+            c["reply_1"] = c["reply_2"] = c["reply_3"] = ""
+
+
+# ============================================================================
+# XLSX 输出（v2 加宽版）
 # ============================================================================
 def export_xlsx(meta: dict, comments: list[dict], out_path: Path, target_lang: str = "ja"):
     wb = Workbook()
 
+    # ---------- Sheet 1: 评论 ----------
     ws = wb.active
     ws.title = "评论"
 
     headers = [
         "楼层", "类型", "用户名", "等级", "大会员", "是否UP", "勋章",
-        "评论中文（原文）", f"翻译（{target_lang}）",
+        "评论中文（原文）",
+        "AI日语翻译",            # v2 新
+        "意图",                   # v2 新
+        "推荐回复 1",             # v2 新
+        "推荐回复 2",             # v2 新
+        "推荐回复 3",             # v2 新
+        f"备用公式翻译（{target_lang}）",
         "点赞", "回复数", "发布时间", "用户签名", "rpid", "父评论rpid",
     ]
     ws.append(headers)
 
     header_fill = PatternFill("solid", fgColor="1F4E78")
     header_font = Font(bold=True, color="FFFFFF", size=11)
+    v2_fill = PatternFill("solid", fgColor="2E7D32")  # v2 列绿色区分
+    v2_font = Font(bold=True, color="FFFFFF", size=11)
+
+    v2_cols = {9, 10, 11, 12, 13}  # 1-indexed
     for col_idx, _ in enumerate(headers, 1):
         cell = ws.cell(row=1, column=col_idx)
-        cell.fill = header_fill
-        cell.font = header_font
+        if col_idx in v2_cols:
+            cell.fill = v2_fill
+            cell.font = v2_font
+        else:
+            cell.fill = header_fill
+            cell.font = header_font
         cell.alignment = Alignment(horizontal="center", vertical="center")
+
+    intent_fills = {
+        "强烈好评": PatternFill("solid", fgColor="E8F5E9"),
+        "情感深度": PatternFill("solid", fgColor="E3F2FD"),
+        "求二创授权": PatternFill("solid", fgColor="FFF9C4"),
+        "求资源": PatternFill("solid", fgColor="FFF9C4"),
+        "求歌词": PatternFill("solid", fgColor="FFF9C4"),
+        "求周边": PatternFill("solid", fgColor="FFECB3"),
+        "求合作": PatternFill("solid", fgColor="FFECB3"),
+        "询问信息": PatternFill("solid", fgColor="F3E5F5"),
+        "负面质疑": PatternFill("solid", fgColor="FFCDD2"),
+        "一般点赞": PatternFill("solid", fgColor="FAFAFA"),
+        "其他": PatternFill("solid", fgColor="FAFAFA"),
+        "UP主本人": PatternFill("solid", fgColor="FFF3CD"),
+        "楼中楼跳过": PatternFill("solid", fgColor="F5F5F5"),
+    }
 
     for i, c in enumerate(comments, start=2):
         typ = "楼中楼" if c["is_sub"] else "主评论"
         floor = "" if c["is_sub"] else i - 1
+
         ws.cell(row=i, column=1, value=floor)
         ws.cell(row=i, column=2, value=typ)
         ws.cell(row=i, column=3, value=c["uname"])
@@ -421,34 +464,49 @@ def export_xlsx(meta: dict, comments: list[dict], out_path: Path, target_lang: s
         ws.cell(row=i, column=6, value=c["is_up"])
         ws.cell(row=i, column=7, value=c["nameplate"])
         ws.cell(row=i, column=8, value=c["message"])
-        ws.cell(row=i, column=9,
+        ws.cell(row=i, column=9, value=c.get("ai_translation", ""))
+        ws.cell(row=i, column=10, value=c.get("intent", ""))
+        ws.cell(row=i, column=11, value=c.get("reply_1", ""))
+        ws.cell(row=i, column=12, value=c.get("reply_2", ""))
+        ws.cell(row=i, column=13, value=c.get("reply_3", ""))
+        ws.cell(row=i, column=14,
                 value=f'=IF(H{i}="","",GOOGLETRANSLATE(H{i},"zh-CN","{target_lang}"))')
-        ws.cell(row=i, column=10, value=c["like"])
-        ws.cell(row=i, column=11, value=c["rcount"])
-        ws.cell(row=i, column=12, value=fmt_time(c["ctime"]))
-        ws.cell(row=i, column=13, value=c["sign"])
-        ws.cell(row=i, column=14, value=str(c["rpid"]))
-        ws.cell(row=i, column=15, value=str(c["parent_rpid"]) if c["parent_rpid"] else "")
+        ws.cell(row=i, column=15, value=c["like"])
+        ws.cell(row=i, column=16, value=c["rcount"])
+        ws.cell(row=i, column=17, value=fmt_time(c["ctime"]))
+        ws.cell(row=i, column=18, value=c["sign"])
+        ws.cell(row=i, column=19, value=str(c["rpid"]))
+        ws.cell(row=i, column=20, value=str(c["parent_rpid"]) if c["parent_rpid"] else "")
 
-    widths = [6, 8, 22, 6, 8, 8, 14, 60, 60, 8, 8, 18, 30, 16, 16]
+        # 意图颜色
+        intent = c.get("intent", "")
+        fill = intent_fills.get(intent)
+        if fill:
+            ws.cell(row=i, column=10).fill = fill
+
+    widths = [6, 8, 20, 5, 6, 6, 12, 50, 50, 10, 40, 40, 40, 40, 7, 7, 16, 25, 14, 14]
     for i, w in enumerate(widths, 1):
         ws.column_dimensions[get_column_letter(i)].width = w
 
     ws.freeze_panes = "A2"
     ws.auto_filter.ref = ws.dimensions
-    for row in ws.iter_rows(min_row=2, min_col=8, max_col=9):
+    for row in ws.iter_rows(min_row=2, min_col=8, max_col=14):
         for cell in row:
             cell.alignment = Alignment(wrap_text=True, vertical="top")
 
     up_fill = PatternFill("solid", fgColor="FFF3CD")
     for row_idx in range(2, ws.max_row + 1):
         if ws.cell(row=row_idx, column=6).value == "是":
-            for col_idx in range(1, len(headers) + 1):
+            for col_idx in [1, 2, 3, 4, 5, 6, 7, 8]:
                 ws.cell(row=row_idx, column=col_idx).fill = up_fill
 
-    # Sheet 2: 视频信息
+    # ---------- Sheet 2: 视频信息 ----------
     ws2 = wb.create_sheet("视频信息")
     stat = meta.get("stat") or {}
+    intents_dist = {}
+    for c in comments:
+        intents_dist[c.get("intent", "无")] = intents_dist.get(c.get("intent", "无"), 0) + 1
+
     info_rows = [
         ("视频标题", meta["title"]),
         ("BV 号", meta["bvid"]),
@@ -470,7 +528,7 @@ def export_xlsx(meta: dict, comments: list[dict], out_path: Path, target_lang: s
         ("", ""),
         ("=== 采集统计 ===", ""),
         ("采集时间", fmt_time(meta.get("collected_at", 0))),
-        ("是否登录采集", "是" if meta.get("logged_in") else "否（可能有条数限制）"),
+        ("是否登录采集", "是" if meta.get("logged_in") else "否（有条数限制）"),
         ("采集到主评论", sum(1 for c in comments if not c["is_sub"])),
         ("采集到楼中楼", sum(1 for c in comments if c["is_sub"])),
         ("合计", len(comments)),
@@ -478,22 +536,27 @@ def export_xlsx(meta: dict, comments: list[dict], out_path: Path, target_lang: s
         ("大会员评论数", sum(1 for c in comments if c["vip"] == "是")),
         ("平均等级", round(sum(c["level"] for c in comments) / max(len(comments), 1), 2)),
         ("最高点赞", max((c["like"] for c in comments), default=0)),
+        ("", ""),
+        ("=== 意图分布 ===", ""),
     ]
+    for intent, count in sorted(intents_dist.items(), key=lambda x: -x[1]):
+        info_rows.append((f"  {intent}", count))
+
     for r in info_rows:
         ws2.append(r)
-    ws2.column_dimensions["A"].width = 22
+    ws2.column_dimensions["A"].width = 24
     ws2.column_dimensions["B"].width = 60
     for row in ws2.iter_rows(min_row=1, max_row=ws2.max_row, min_col=1, max_col=1):
         for cell in row:
             cell.font = Font(bold=True)
 
-    # Sheet 3: Top 20
+    # ---------- Sheet 3: Top 20 高赞（含回复推荐） ----------
     ws3 = wb.create_sheet("Top 20 高赞")
-    ws3.append(["排名", "用户名", "等级", "点赞", "回复数", "评论中文", f"翻译（{target_lang}）", "链接"])
-    for col_idx in range(1, 9):
+    ws3.append(["排名", "用户名", "等级", "点赞", "评论中文", "AI日语翻译", "意图", "推荐回复 1", "链接"])
+    for col_idx in range(1, 10):
         cell = ws3.cell(row=1, column=col_idx)
-        cell.fill = header_fill
-        cell.font = header_font
+        cell.fill = v2_fill if col_idx in (6, 7, 8) else header_fill
+        cell.font = v2_font if col_idx in (6, 7, 8) else header_font
         cell.alignment = Alignment(horizontal="center")
 
     top20 = sorted(
@@ -505,47 +568,61 @@ def export_xlsx(meta: dict, comments: list[dict], out_path: Path, target_lang: s
         ws3.cell(row=i, column=2, value=c["uname"])
         ws3.cell(row=i, column=3, value=c["level"])
         ws3.cell(row=i, column=4, value=c["like"])
-        ws3.cell(row=i, column=5, value=c["rcount"])
-        ws3.cell(row=i, column=6, value=c["message"])
-        ws3.cell(row=i, column=7,
-                 value=f'=IF(F{i}="","",GOOGLETRANSLATE(F{i},"zh-CN","{target_lang}"))')
-        ws3.cell(row=i, column=8, value=f"https://www.bilibili.com/video/{meta['bvid']}#reply{c['rpid']}")
+        ws3.cell(row=i, column=5, value=c["message"])
+        ws3.cell(row=i, column=6, value=c.get("ai_translation", ""))
+        ws3.cell(row=i, column=7, value=c.get("intent", ""))
+        ws3.cell(row=i, column=8, value=c.get("reply_1", ""))
+        ws3.cell(row=i, column=9,
+                 value=f"https://www.bilibili.com/video/{meta['bvid']}#reply{c['rpid']}")
+        intent = c.get("intent", "")
+        fill = intent_fills.get(intent)
+        if fill:
+            ws3.cell(row=i, column=7).fill = fill
 
-    widths3 = [6, 22, 6, 8, 8, 60, 60, 40]
+    widths3 = [6, 20, 5, 7, 55, 55, 10, 45, 45]
     for i, w in enumerate(widths3, 1):
         ws3.column_dimensions[get_column_letter(i)].width = w
     ws3.freeze_panes = "A2"
-    for row in ws3.iter_rows(min_row=2, min_col=6, max_col=7):
+    for row in ws3.iter_rows(min_row=2, min_col=5, max_col=8):
         for cell in row:
             cell.alignment = Alignment(wrap_text=True, vertical="top")
 
     out_path.parent.mkdir(parents=True, exist_ok=True)
     wb.save(out_path)
     print(f"\n✓ XLSX 已保存：{out_path.resolve()}")
-    print(f"  → 上传到 Google Sheets 后，翻译列会自动执行 =GOOGLETRANSLATE 公式")
-    print(f"  → 用本地 Excel/WPS 打开会显示 #NAME? 错误（GOOGLETRANSLATE 是 Google Sheets 独有）")
+    print(f"  → 绿色列（AI日语翻译 / 意图 / 推荐回复）在本地 Excel 里也可直接看")
+    print(f"  → 「备用公式翻译」列在 Google Sheets 里会自动执行 =GOOGLETRANSLATE")
 
 
 # ============================================================================
 # 入口
 # ============================================================================
 def main():
-    p = argparse.ArgumentParser(description="BiliComments — B 站视频评论收集器")
+    p = argparse.ArgumentParser(description="BiliComments v2 — 评论收集 + AI 翻译 + 回复推荐")
     p.add_argument("bvid", help="BVxxx 或视频链接")
     p.add_argument("--out", help="输出 XLSX 路径（默认 data/<bvid>.xlsx）")
     p.add_argument("--sort", choices=["hot", "new", "up-only"], default="hot")
     p.add_argument("--max-pages", type=int, help="最多拉取多少页评论")
     p.add_argument("--include-replies", action="store_true", help="同时拉楼中楼")
     p.add_argument("--target-lang", default="ja", help="翻译目标语言（默认 ja 日语）")
+    p.add_argument("--no-translate", action="store_true", help="关闭 v2 AI 翻译（只保留公式列）")
+    p.add_argument("--no-reply", action="store_true", help="关闭 v2 回复推荐")
     args = p.parse_args()
 
     bvid = parse_bvid(args.bvid)
     meta, comments = collect_all(
-        bvid,
-        sort=args.sort,
-        max_pages=args.max_pages,
-        include_replies=args.include_replies,
+        bvid, sort=args.sort,
+        max_pages=args.max_pages, include_replies=args.include_replies,
     )
+
+    if comments:
+        print()
+        enrich_comments(
+            comments,
+            do_translate=not args.no_translate,
+            do_reply=not args.no_reply,
+            target_lang=args.target_lang,
+        )
 
     out_path = Path(args.out) if args.out else (DEFAULT_OUT_DIR / f"{bvid}.xlsx")
     export_xlsx(meta, comments, out_path, target_lang=args.target_lang)

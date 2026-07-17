@@ -1,9 +1,9 @@
 ---
 name: bili-comments
-description: 采集 B 站视频的所有评论并导出为 Google Sheets 友好的 XLSX（含中→日自动翻译公式）。当用户提供 B 站视频链接或 bvid，说"抓评论""收集评论""导出到表格""翻译评论""看看别人怎么评的"等意图时使用。为日本创作者/曲师看粉丝反馈场景设计。
+description: 采集 B 站视频评论并导出增强 XLSX。v2 特性：AI 日语翻译（Google Translate + Vocaloid 术语表预处理）+ 自动意图分类 + 推荐日语回复模板。当用户提供 B 站视频链接或 bvid，说"抓评论""收集评论""翻译评论""生成回复""看看别人怎么评的"等意图时使用。为日本创作者/曲师看粉丝反馈 + 快速回复场景设计。
 ---
 
-# BiliComments — B 站评论收集器
+# BiliComments v2 — B 站评论收集器 + AI 翻译 + 回复推荐
 
 将 B 站视频的评论全量抓下来 → 导出成 XLSX → 上传 Google Sheets 后自动出现日语翻译。
 
@@ -26,33 +26,40 @@ Set-Location "C:\Users\何\Documents\Claude\Projects\MCN创业\bili-comments"
 ## 常用命令
 
 ```powershell
-# 抓热度前 N 页主评论（默认 hot 排序，抓完所有页）
+# v2 默认：抓评论 + AI 翻译 + 意图分类 + 回复推荐（全部启用）
 .\run.ps1 BV1FDNJ6BE4j
 
-# 只抓前 5 页（快速尝鲜，100 条）
-.\run.ps1 BV1FDNJ6BE4j --max-pages 5
+# 只抓 top 20（1 页热门，最快，推荐 Vocaloid 场景日常用）
+.\run.ps1 BV1FDNJ6BE4j --max-pages 1
 
 # 按时间新→旧
 .\run.ps1 BV1FDNJ6BE4j --sort new
 
-# 含所有楼中楼（子评论），完整但慢
+# 含所有楼中楼（完整但慢）
 .\run.ps1 BV1FDNJ6BE4j --include-replies
 
-# 指定输出路径
-.\run.ps1 BV1FDNJ6BE4j --out C:\Users\me\Desktop\comments.xlsx
+# 关掉 v2 特性（v1 模式，只出公式列）
+.\run.ps1 BV1FDNJ6BE4j --no-translate --no-reply
+
+# 只关翻译，保留回复推荐
+.\run.ps1 BV1FDNJ6BE4j --no-translate
 
 # 翻成英语/韩语
 .\run.ps1 BV1FDNJ6BE4j --target-lang en
-.\run.ps1 BV1FDNJ6BE4j --target-lang ko
 ```
 
 ## 输出文件
 
 默认保存到 `data/<bvid>.xlsx`，含 3 个 Sheet：
 
-1. **评论**：所有评论（15 列，含 GOOGLETRANSLATE 翻译公式）
-2. **视频信息**：视频元数据 + 采集统计
-3. **Top 20 高赞**：最热的 20 条主评论，便于扫读
+1. **评论**：所有评论（20 列，含 v2 的 AI日语翻译 / 意图 / 推荐回复 1-3）
+2. **视频信息**：视频元数据 + 采集统计 + 意图分布饼图数据
+3. **Top 20 高赞**：最热的 20 条主评论 + AI 翻译 + 意图 + 推荐回复
+
+**v2 新增列（Sheet 1 里绿色表头）**：
+- `AI日语翻译` — Google Translate + Vocaloid 术语预处理（YYDS/破防/苹果p 等自动替换）
+- `意图` — 自动分类：强烈好评/情感深度/求二创授权/求资源/求歌词/求周边/求合作/询问信息/负面质疑/一般点赞/UP主本人/其他（不同颜色）
+- `推荐回复 1/2/3` — 每条评论对应意图的 3 条日语回复模板供 UP 挑选
 
 ## 关键行为
 
