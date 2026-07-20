@@ -401,66 +401,58 @@ def enrich_comments(
 # XLSX 输出（v2 加宽版）
 # ============================================================================
 def export_xlsx(meta: dict, comments: list[dict], out_path: Path, target_lang: str = "ja"):
+    """
+    v3.0 简化版：
+    - 删除 Sheet 1 「评论」（用户不要全量评论）
+    - Sheet 1 变成「Top 20 高赞」
+    - Sheet 2「视频信息」精简：去掉登录状态/主评论数/楼中楼数/合计/UP回复数/大会员数/平均等级/最高点赞
+    """
     wb = Workbook()
-
-    # ---------- Sheet 1: 评论 ----------
-    ws = wb.active
-    ws.title = "评论"
-
-    # v2.1 精简版：只保留 5 个核心列
-    headers = [
-        "用户名",
-        "评论中文（原文）",
-        "AI日语翻译",
-        "点赞",
-        "发布时间",
-    ]
-    ws.append(headers)
 
     header_fill = PatternFill("solid", fgColor="1F4E78")
     header_font = Font(bold=True, color="FFFFFF", size=11)
     v2_fill = PatternFill("solid", fgColor="2E7D32")
+    up_fill = PatternFill("solid", fgColor="FFF3CD")
 
-    # 只有 "AI日语翻译" 列用绿色区分
-    v2_cols = {3}
-    for col_idx, _ in enumerate(headers, 1):
+    # ---------- Sheet 1: Top 20 高赞（v3.0 现在是主表）----------
+    ws = wb.active
+    ws.title = "Top 20 高赞"
+    ws.append(["排名", "用户名", "点赞", "评论中文", "AI日语翻译", "链接"])
+    for col_idx in range(1, 7):
         cell = ws.cell(row=1, column=col_idx)
-        cell.fill = v2_fill if col_idx in v2_cols else header_fill
+        cell.fill = v2_fill if col_idx == 5 else header_fill
         cell.font = header_font
-        cell.alignment = Alignment(horizontal="center", vertical="center")
+        cell.alignment = Alignment(horizontal="center")
 
-    for i, c in enumerate(comments, start=2):
-        ws.cell(row=i, column=1, value=c["uname"])
-        ws.cell(row=i, column=2, value=c["message"])
-        ws.cell(row=i, column=3, value=c.get("ai_translation", ""))
-        ws.cell(row=i, column=4, value=c["like"])
-        ws.cell(row=i, column=5, value=fmt_time(c["ctime"]))
+    top20 = sorted(
+        [c for c in comments if not c["is_sub"]],
+        key=lambda c: c["like"], reverse=True,
+    )[:20]
+    for i, c in enumerate(top20, start=2):
+        ws.cell(row=i, column=1, value=i - 1)
+        ws.cell(row=i, column=2, value=c["uname"])
+        ws.cell(row=i, column=3, value=c["like"])
+        ws.cell(row=i, column=4, value=c["message"])
+        ws.cell(row=i, column=5, value=c.get("ai_translation", ""))
+        ws.cell(row=i, column=6, value=f"https://www.bilibili.com/video/{meta['bvid']}#reply{c['rpid']}")
 
-    widths = [22, 60, 60, 8, 18]
+    widths = [6, 22, 8, 60, 60, 40]
     for i, w in enumerate(widths, 1):
         ws.column_dimensions[get_column_letter(i)].width = w
-
     ws.freeze_panes = "A2"
-    ws.auto_filter.ref = ws.dimensions
-    # 评论 + 翻译两列开启换行
-    for row in ws.iter_rows(min_row=2, min_col=2, max_col=3):
+    for row in ws.iter_rows(min_row=2, min_col=4, max_col=5):
         for cell in row:
             cell.alignment = Alignment(wrap_text=True, vertical="top")
 
-    # UP 主评论自动高亮（用原始数据的 is_up 字段判断）
-    up_fill = PatternFill("solid", fgColor="FFF3CD")
-    for i, c in enumerate(comments, start=2):
+    # UP 主评论行自动黄色高亮
+    for i, c in enumerate(top20, start=2):
         if c.get("is_up") == "是":
-            for col_idx in range(1, len(headers) + 1):
+            for col_idx in range(1, 7):
                 ws.cell(row=i, column=col_idx).fill = up_fill
 
-    # ---------- Sheet 2: 视频信息 ----------
+    # ---------- Sheet 2: 视频信息（v3.0 精简版）----------
     ws2 = wb.create_sheet("视频信息")
     stat = meta.get("stat") or {}
-    intents_dist = {}
-    for c in comments:
-        intents_dist[c.get("intent", "无")] = intents_dist.get(c.get("intent", "无"), 0) + 1
-
     info_rows = [
         ("视频标题", meta["title"]),
         ("BV 号", meta["bvid"]),
@@ -480,70 +472,20 @@ def export_xlsx(meta: dict, comments: list[dict], out_path: Path, target_lang: s
         ("评论（声称）", stat.get("reply", 0)),
         ("弹幕", stat.get("danmaku", 0)),
         ("", ""),
-        ("=== 采集统计 ===", ""),
         ("采集时间", fmt_time(meta.get("collected_at", 0))),
-        ("是否登录采集", "是" if meta.get("logged_in") else "否（有条数限制）"),
-        ("采集到主评论", sum(1 for c in comments if not c["is_sub"])),
-        ("采集到楼中楼", sum(1 for c in comments if c["is_sub"])),
-        ("合计", len(comments)),
-        ("UP 主回复条数", sum(1 for c in comments if c["is_up"] == "是")),
-        ("大会员评论数", sum(1 for c in comments if c["vip"] == "是")),
-        ("平均等级", round(sum(c["level"] for c in comments) / max(len(comments), 1), 2)),
-        ("最高点赞", max((c["like"] for c in comments), default=0)),
-        ("", ""),
-        ("=== 意图分布 ===", ""),
     ]
-    for intent, count in sorted(intents_dist.items(), key=lambda x: -x[1]):
-        info_rows.append((f"  {intent}", count))
-
     for r in info_rows:
         ws2.append(r)
-    ws2.column_dimensions["A"].width = 24
+    ws2.column_dimensions["A"].width = 22
     ws2.column_dimensions["B"].width = 60
     for row in ws2.iter_rows(min_row=1, max_row=ws2.max_row, min_col=1, max_col=1):
         for cell in row:
             cell.font = Font(bold=True)
 
-    # ---------- Sheet 3: Top 20 高赞（v2.1 精简版）----------
-    ws3 = wb.create_sheet("Top 20 高赞")
-    ws3.append(["排名", "用户名", "点赞", "评论中文", "AI日语翻译", "链接"])
-    for col_idx in range(1, 7):
-        cell = ws3.cell(row=1, column=col_idx)
-        cell.fill = v2_fill if col_idx == 5 else header_fill
-        cell.font = header_font
-        cell.alignment = Alignment(horizontal="center")
-
-    top20 = sorted(
-        [c for c in comments if not c["is_sub"]],
-        key=lambda c: c["like"], reverse=True,
-    )[:20]
-    for i, c in enumerate(top20, start=2):
-        ws3.cell(row=i, column=1, value=i - 1)
-        ws3.cell(row=i, column=2, value=c["uname"])
-        ws3.cell(row=i, column=3, value=c["like"])
-        ws3.cell(row=i, column=4, value=c["message"])
-        ws3.cell(row=i, column=5, value=c.get("ai_translation", ""))
-        ws3.cell(row=i, column=6, value=f"https://www.bilibili.com/video/{meta['bvid']}#reply{c['rpid']}")
-
-    widths3 = [6, 22, 8, 60, 60, 40]
-    for i, w in enumerate(widths3, 1):
-        ws3.column_dimensions[get_column_letter(i)].width = w
-    ws3.freeze_panes = "A2"
-
-    # Top 20 里的 UP 主评论也高亮
-    for i, c in enumerate(top20, start=2):
-        if c.get("is_up") == "是":
-            for col_idx in range(1, 7):
-                ws3.cell(row=i, column=col_idx).fill = up_fill
-    # 评论 + 翻译两列开启换行
-    for row in ws3.iter_rows(min_row=2, min_col=4, max_col=5):
-        for cell in row:
-            cell.alignment = Alignment(wrap_text=True, vertical="top")
-
     out_path.parent.mkdir(parents=True, exist_ok=True)
     wb.save(out_path)
     print(f"\n✓ XLSX 已保存：{out_path.resolve()}")
-    print(f"  → 5 列精简版：用户名 / 评论中文 / AI日语翻译 / 点赞 / 发布时间")
+    print(f"  → v3.0 精简版：Top 20 高赞（主表）+ 视频信息（副表）")
     print(f"  → UP 主评论行自动黄色高亮")
 
 
